@@ -1,3 +1,3 @@
-# Rise MDK
+# Swish swoosh readme
 
-This project aims to create Rise-specific types and utility functions, with the end goal of making Monster Hunter Rise modding easier.
+Swoosh bwoowowom swoooooosh swiiiiiish swoosh bwowom swosh swish swosh
