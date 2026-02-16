@@ -33,6 +33,7 @@ end
 ---@field init fun(): self
 ---@field is_over fun(self: self): boolean
 ---@field get_next fun(): State | nil
+---@field draw_ui fun(): nil
 
 ---@class ChargingState : State
 ---@field inner {current: integer, required: integer}
@@ -59,7 +60,8 @@ CooldownState.__index = CooldownState
 function ChargingState.init()
   return setmetatable({
     inner = { current = 0, required = config.charge_required },
-    get_next = function() return ActiveState.init() end
+    get_next = function() return ActiveState.init() end,
+    draw_ui = function() end,
   }, ChargingState)
 end
 
@@ -84,11 +86,17 @@ function ActiveState:get_next()
   return res
 end
 
+function ActiveState:draw_ui()
+  imgui.text("Hits:")
+  imgui.same_line()
+  imgui.text_colored(tostring(#self.inner.hits), 0xff7777ff)
+end
+
 ---@return self
 function ApplyingState.init()
   return setmetatable({
     inner = { start = time(), hits = {}, done = 0, speed = config.applying_speedup },
-    get_next = function() return CooldownState.init() end
+    get_next = function() return CooldownState.init() end,
   }, ApplyingState)
 end
 
@@ -96,16 +104,26 @@ function ApplyingState:is_over()
   return self.inner.done > #self.inner.hits
 end
 
+function ApplyingState:draw_ui()
+  imgui.text("Hits:")
+  imgui.same_line()
+  imgui.text_colored(string.format("%d / %d", self.inner.done, #self.inner.hits), 0xff7777ff)
+end
+
 ---@return self
 function CooldownState.init()
   return setmetatable({
     inner = { start = time(), duration = config.cooldown_duration },
-    get_next = function() return ChargingState.init() end
+    get_next = function() return ChargingState.init() end,
   }, CooldownState)
 end
 
 function CooldownState:is_over()
   return time() > self.inner.start + self.inner.duration
+end
+
+function CooldownState:draw_ui()
+  imgui.text_colored(string.format("Cooldown: %d", self.inner.start + self.inner.duration - time()), 0xffff7777)
 end
 
 ---@class StateManager
@@ -168,7 +186,10 @@ local function onStockDamage(hitInfo)
   local physical_damage = hitInfo:get_physical_damage()
   local elemental_damage = hitInfo:get_elemental_damage()
 
-  if state_manager:is(ActiveState) then
+  if state_manager:is(ChargingState) then
+    local state = state_manager.state --[[@as ChargingState]]
+    state.inner.current = math.min(state.inner.required, state.inner.current + physical_damage + elemental_damage)
+  elseif state_manager:is(ActiveState) then
     local state = state_manager.state --[[@as ActiveState]]
     local hits = state.inner.hits
     hits[#hits + 1] = {
@@ -177,9 +198,6 @@ local function onStockDamage(hitInfo)
       elemental = elemental_damage,
       pos = hitInfo:get_detailed_position()
     }
-  elseif state_manager:is(ChargingState) then
-    local state = state_manager.state --[[@as ChargingState]]
-    state.inner.current = math.min(state.inner.required, state.inner.current + physical_damage + elemental_damage)
   end
 end
 
@@ -200,6 +218,16 @@ local function main()
     end
 
     state_manager:update()
+
+    if state_manager:is(ApplyingState) then
+      local state = state_manager.state --[[@as ApplyingState]]
+      local now = time()
+      --Go through every recorded hit with the speed multiplier and create a damaging shell in the same spot
+      while now > state.inner.start + state.inner.hits[state.inner.done + 1] / state.inner.speed do
+        state.inner.done = state.inner.done + 1
+        -- TODO: Create a damaging shell at the desired position
+      end
+    end
   end)
 end
 
@@ -217,7 +245,10 @@ re.on_draw_ui(function()
       local state = state_manager.state --[[@as ActiveState]]
       charge = 1 - (time() - state.inner.start) / state.inner.duration
     end
-    imgui.progress_bar(charge, Vector2f.new(500, 50), string.format("Charge: %d%%", charge))
+    imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%%", charge))
+
+    state_manager.state:draw_ui()
+
     imgui.tree_pop()
   end
 end)
