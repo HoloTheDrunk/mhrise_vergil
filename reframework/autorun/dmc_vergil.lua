@@ -85,12 +85,16 @@ function ChargingState.init()
   return setmetatable({
     inner = { current = 0, required = config.charge_required },
     get_next = function() return ActiveState.init() end,
-    draw_ui = function() end,
   }, ChargingState)
 end
 
 function ChargingState:is_over()
   return self.inner.current >= self.inner.required
+end
+
+function ChargingState:draw_ui()
+  local charge = self.inner.current / self.inner.required
+  imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%%", charge))
 end
 
 ---@return self
@@ -115,6 +119,8 @@ function ActiveState:draw_ui()
   imgui.text("Hits:")
   imgui.same_line()
   imgui.text_colored(tostring(#self.inner.hits), 0xff7777ff)
+  local charge = 1 - (time() - self.inner.start) / self.inner.duration
+  imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%% ⬇", charge))
 end
 
 ---@return self
@@ -259,16 +265,6 @@ end
 
 re.on_draw_ui(function()
   if imgui.tree_node("DMC Vergil") then
-    local charge = 0
-    if state_manager:is(ChargingState) then
-      local state = state_manager.state --[[@as ChargingState]]
-      charge = state.inner.current / state.inner.required
-    elseif state_manager:is(ActiveState) then
-      local state = state_manager.state --[[@as ActiveState]]
-      charge = 1 - (time() - state.inner.start) / state.inner.duration
-    end
-    imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%%", charge))
-
     state_manager.state:draw_ui()
 
     imgui.tree_pop()
