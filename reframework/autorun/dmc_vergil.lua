@@ -9,6 +9,7 @@ local hooks = mdk.hooks
 local config = {
   charge_required = 10000,
   active_duration = 10,
+  active_timescale = 0.2,
   applying_speedup = 2,
   cooldown_duration = 15,
 }
@@ -19,12 +20,35 @@ local config = {
 ---@field elemental number
 ---@field pos { pos: Vector3f, joint: unknown|nil }
 
----@type integer|nil Time cache invalidated every update cycle
+---@type number|nil Time cache invalidated every update cycle
 local _time_cache = nil
----@return integer
+---@return number
 local function time()
-  return _time_cache or os.time()
+  return _time_cache or mdk.utils.get_uptime()
 end
+
+--Timescale management (start)
+local scene_manager = sdk.get_native_singleton("via.SceneManager")
+local scene_manager_type = sdk.find_type_definition("via.SceneManager") --[[@as RETypeDefinition]]
+---@type REManagedObject
+local scene = sdk.call_native_func(scene_manager, scene_manager_type, "get_CurrentScene")
+
+---@type REManagedObject
+local time_scale_manager = sdk.get_managed_singleton('snow.TimeScaleManager') --[[@as REManagedObject]]
+---@type REManagedObject
+local camera_manager = sdk.get_managed_singleton('snow.CameraManager') --[[@as REManagedObject]]
+---@type REManagedObject
+local system_manager = sdk.get_managed_singleton('snow.GameKeyboard') --[[@as REManagedObject]]
+
+---@param speed number
+---@return nil
+local function set_time_scale(speed)
+  scene:call("set_TimeScale", speed)
+  time_scale_manager:call("set_TimeScale", speed)
+  camera_manager:call("get_GameObject"):call("set_TimeScale", 1.0)
+  system_manager:call("get_GameObject"):call("set_TimeScale", 1.0)
+end
+--Timescale management (end)
 
 --Start of the madness
 
@@ -71,6 +95,7 @@ end
 
 ---@return self
 function ActiveState.init()
+  set_time_scale(config.active_timescale)
   return setmetatable({
     inner = { start = time(), duration = config.active_duration, hits = {} },
   }, ActiveState)
@@ -94,6 +119,7 @@ end
 
 ---@return self
 function ApplyingState.init()
+  set_time_scale(1.)
   return setmetatable({
     inner = { start = time(), hits = {}, done = 0, speed = config.applying_speedup },
     get_next = function() return CooldownState.init() end,
@@ -171,7 +197,7 @@ end
 
 local state_manager = StateManager.new()
 
----Disable the mod in multiplayer, I'm not dealing with that
+---Disable the mod in multiplayer
 local is_online = false
 
 local function init()
@@ -233,10 +259,6 @@ end
 
 re.on_draw_ui(function()
   if imgui.tree_node("DMC Vergil") then
-    if state_manager:is(ActiveState) or state_manager:is(ApplyingState) then
-      local state = state_manager.state --[[@as ActiveState|ApplyingState]]
-      imgui.text(string.format("Hit count: %d", #state.inner.hits))
-    end
     local charge = 0
     if state_manager:is(ChargingState) then
       local state = state_manager.state --[[@as ChargingState]]
