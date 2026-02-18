@@ -138,6 +138,9 @@ function ActiveState:draw_ui()
   imgui.text_colored(tostring(#self.inner.hits), 0xff9999ff)
   local charge = 1 - (time() - self.inner.start) / self.inner.duration
   imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%% ⬇", math.floor(100 * charge)))
+  for i, hit in pairs(self.inner.hits) do
+    imgui.text(string.format("%.1f | %.0f phys %.0f elem", hit.timing, hit.physical, hit.elemental))
+  end
 end
 
 ---@return self
@@ -292,7 +295,6 @@ local function main()
       do
         state.inner.done = state.inner.done + 1
         local hit = state.inner.hits[state.inner.done]
-        debug = debug .. string.format("\n[HIT] %.0f phys %.0f elem", hit.physical, hit.elemental)
         -- TODO: Create a damaging shell at the desired position
       end
     end
