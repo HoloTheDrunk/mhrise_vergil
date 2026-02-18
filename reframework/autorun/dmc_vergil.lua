@@ -2,17 +2,23 @@
 ---up a simple state machine in preparation for future, more complex move addition mods.
 ---My apologies if you're reading this to learn how to mod.
 
+local show_debug = true
+local debug = ""
+
 local mdk = require("mdk.prelude")
 local attach_hook = mdk.attach_hook
 local hooks = mdk.hooks
 
 local config = {
-  charge_required = 10000,
+  charge_required = 1000,
   active_duration = 10,
   active_timescale = 0.2,
   applying_speedup = 2,
   cooldown_duration = 15,
 }
+
+---@type mdk.QuestPlayer?
+local player = nil
 
 ---@class SavedHit
 ---@field timing number
@@ -27,6 +33,9 @@ local function time()
   return _time_cache or mdk.utils.get_uptime()
 end
 
+---@type number
+local last_motion_id = 1
+
 --Timescale management (start)
 local scene_manager = sdk.get_native_singleton("via.SceneManager")
 local scene_manager_type = sdk.find_type_definition("via.SceneManager") --[[@as RETypeDefinition]]
@@ -34,11 +43,11 @@ local scene_manager_type = sdk.find_type_definition("via.SceneManager") --[[@as 
 local scene = sdk.call_native_func(scene_manager, scene_manager_type, "get_CurrentScene")
 
 ---@type REManagedObject
-local time_scale_manager = sdk.get_managed_singleton('snow.TimeScaleManager') --[[@as REManagedObject]]
+local time_scale_manager = sdk.get_managed_singleton("snow.TimeScaleManager") --[[@as REManagedObject]]
 ---@type REManagedObject
-local camera_manager = sdk.get_managed_singleton('snow.CameraManager') --[[@as REManagedObject]]
+local camera_manager = sdk.get_managed_singleton("snow.CameraManager") --[[@as REManagedObject]]
 ---@type REManagedObject
-local system_manager = sdk.get_managed_singleton('snow.GameKeyboard') --[[@as REManagedObject]]
+local system_manager = sdk.get_managed_singleton("snow.GameKeyboard") --[[@as REManagedObject]]
 
 ---@param speed number
 ---@return nil
@@ -56,11 +65,12 @@ end
 ---@field inner unknown
 ---@field init fun(): self
 ---@field is_over fun(self: self): boolean
----@field get_next fun(): State | nil
----@field draw_ui fun(): nil
+---@field get_next fun(self: self): State | nil
+---@field get_name fun(self: self): string
+---@field draw_ui fun(self: self): nil
 
 ---@class ChargingState : State
----@field inner {current: integer, required: integer}
+---@field inner {current: number, required: number, iai: boolean}
 local ChargingState = {}
 ChargingState.__index = ChargingState
 
@@ -71,7 +81,7 @@ ActiveState.__index = ActiveState
 
 ---Applies all the hits again in the same order and at the same positions but <speed> times as fast
 ---@class ApplyingState : State
----@field inner {start: number, hits: SavedHit[], done: number, speed: number}
+---@field inner {start: number, hits: SavedHit[], done: integer, speed: number}
 local ApplyingState = {}
 ApplyingState.__index = ApplyingState
 
@@ -83,25 +93,32 @@ CooldownState.__index = CooldownState
 ---@return self
 function ChargingState.init()
   return setmetatable({
-    inner = { current = 0, required = config.charge_required },
+    inner = { current = 0, required = config.charge_required, iai = false },
     get_next = function() return ActiveState.init() end,
+    get_name = function() return "Charging" end
   }, ChargingState)
 end
 
 function ChargingState:is_over()
-  return self.inner.current >= self.inner.required
+  if self.inner.iai and self.inner.current >= self.inner.required then
+    return true
+  end
+  self.inner.iai = false
+  return false
 end
 
 function ChargingState:draw_ui()
   local charge = self.inner.current / self.inner.required
-  imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%%", charge))
+  imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%%", math.floor(100 * charge)))
 end
 
 ---@return self
 function ActiveState.init()
+  player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 2.0 / config.active_timescale)
   set_time_scale(config.active_timescale)
   return setmetatable({
     inner = { start = time(), duration = config.active_duration, hits = {} },
+    get_name = function() return "Active" end
   }, ActiveState)
 end
 
@@ -118,28 +135,30 @@ end
 function ActiveState:draw_ui()
   imgui.text("Hits:")
   imgui.same_line()
-  imgui.text_colored(tostring(#self.inner.hits), 0xff7777ff)
+  imgui.text_colored(tostring(#self.inner.hits), 0xff9999ff)
   local charge = 1 - (time() - self.inner.start) / self.inner.duration
-  imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%% ⬇", charge))
+  imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%% ⬇", math.floor(100 * charge)))
 end
 
 ---@return self
 function ApplyingState.init()
+  player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 1.0)
   set_time_scale(1.)
   return setmetatable({
     inner = { start = time(), hits = {}, done = 0, speed = config.applying_speedup },
     get_next = function() return CooldownState.init() end,
+    get_name = function() return "Applying" end
   }, ApplyingState)
 end
 
 function ApplyingState:is_over()
-  return self.inner.done > #self.inner.hits
+  return self.inner.done >= #self.inner.hits
 end
 
 function ApplyingState:draw_ui()
   imgui.text("Hits:")
   imgui.same_line()
-  imgui.text_colored(string.format("%d / %d", self.inner.done, #self.inner.hits), 0xff7777ff)
+  imgui.text_colored(string.format("%d / %d", self.inner.done, #self.inner.hits), 0xff9999ff)
 end
 
 ---@return self
@@ -147,6 +166,7 @@ function CooldownState.init()
   return setmetatable({
     inner = { start = time(), duration = config.cooldown_duration },
     get_next = function() return ChargingState.init() end,
+    get_name = function() return "Cooldown" end
   }, CooldownState)
 end
 
@@ -155,7 +175,10 @@ function CooldownState:is_over()
 end
 
 function CooldownState:draw_ui()
-  imgui.text_colored(string.format("Cooldown: %d", self.inner.start + self.inner.duration - time()), 0xffff7777)
+  imgui.text_colored(
+    string.format("Cooldown: %ds", math.ceil(self.inner.start + self.inner.duration - time())),
+    0xffff9999
+  )
 end
 
 ---@class StateManager
@@ -170,15 +193,19 @@ function StateManager.new()
   }, StateManager)
 end
 
+function StateManager:to_next()
+  local next = self.state:get_next()
+  if not next then
+    log.error("[dmc_vergil] Invalid state")
+    self.state = ChargingState.init()
+  else
+    self.state = next
+  end
+end
+
 function StateManager:update()
   if self.state:is_over() then
-    local next = self.state:get_next()
-    if not next then
-      log.error("[dmc_vergil] Invalid state")
-      self.state = ChargingState.init()
-    else
-      self.state = next
-    end
+    self:to_next()
   end
 end
 
@@ -206,7 +233,10 @@ local state_manager = StateManager.new()
 ---Disable the mod in multiplayer
 local is_online = false
 
-local function init()
+local function init(args)
+  if args[2] then
+    player = mdk.QuestPlayer.new(args[2])
+  end
   state_manager = StateManager.new()
 
   local lobby_manager = mdk.LobbyManager.new()
@@ -214,7 +244,7 @@ local function init()
 end
 
 ---@param hitInfo HitInfo
-local function onStockDamage(hitInfo)
+local function on_stock_damage(hitInfo)
   local physical_damage = hitInfo:get_physical_damage()
   local elemental_damage = hitInfo:get_elemental_damage()
 
@@ -238,7 +268,7 @@ local function main()
 
   attach_hook(hooks.enemy.stockDamage, function(args)
     if is_online or state_manager:is(CooldownState) then return end
-    onStockDamage(mdk.HitInfo.new(args[3]))
+    on_stock_damage(mdk.HitInfo.new(args[3]))
   end)
 
   attach_hook(hooks.player.update, function(args)
@@ -253,22 +283,78 @@ local function main()
 
     if state_manager:is(ApplyingState) then
       local state = state_manager.state --[[@as ApplyingState]]
+      if #state.inner.hits == 0 then return end
+
       local now = time()
       --Go through every recorded hit with the speed multiplier and create a damaging shell in the same spot
-      while now > state.inner.start + state.inner.hits[state.inner.done + 1] / state.inner.speed do
+      while state.inner.done < #state.inner.hits
+        and now > state.inner.start + state.inner.hits[state.inner.done + 1].timing / state.inner.speed
+      do
         state.inner.done = state.inner.done + 1
+        local hit = state.inner.hits[state.inner.done]
+        debug = debug .. string.format("\n[HIT] %.0f phys %.0f elem", hit.physical, hit.elemental)
         -- TODO: Create a damaging shell at the desired position
       end
     end
   end)
+
+  sdk.hook(
+    sdk.find_type_definition("snow.player.PlayerMotionControl"):get_method("lateUpdate") --[[@as REMethodDefinition]],
+    function(args)
+      local motion_control = sdk.to_managed_object(args[2])
+      if not motion_control then return end
+
+      local bid = motion_control:get_field("_OldBankID")
+      local mid = motion_control:get_field("_OldMotionID")
+
+      if state_manager:is(ChargingState)
+          and bid == mdk.motions.motion_bank_ids.drawn
+          and mid == mdk.motions.motions_ids.ls.special_sheathe_iai_spirit_slash
+      then
+        local state = state_manager.state --[[@as ChargingState]]
+        state.inner.iai = true
+      elseif state_manager:is(ActiveState)
+          and bid ~= mdk.motions.motion_bank_ids.drawn
+      then
+        set_time_scale(1.0)
+        state_manager:to_next()
+      end
+
+      if bid == mdk.motions.motion_bank_ids.drawn then
+        last_motion_id = mid
+      end
+    end
+  )
+
+  sdk.hook(sdk.find_type_definition("snow.player.PlayerQuestBase"):get_method("updateHitStop"),
+    function(args)
+	    if state_manager:is(ActiveState) then
+		    sdk.to_managed_object(args[2]):call("resetHitStop")
+	    end
+    end
+  )
+
+  re.on_draw_ui(function()
+    if imgui.tree_node("DMC Vergil") then
+      imgui.text(string.format("State: %s", state_manager.state:get_name()))
+
+      local success, data = pcall(state_manager.state.draw_ui, state_manager.state)
+      if not success then
+        local error_message = string.format("Failed to render menu: %s", tostring(data))
+        imgui.text(error_message)
+        log.error(error_message)
+      end
+
+      imgui.separator()
+
+      if #debug > 0 then
+        imgui.text(string.format("debug: %s", debug))
+        -- debug = ""
+      end
+
+      imgui.tree_pop()
+    end
+  end)
 end
-
-re.on_draw_ui(function()
-  if imgui.tree_node("DMC Vergil") then
-    state_manager.state:draw_ui()
-
-    imgui.tree_pop()
-  end
-end)
 
 main()
