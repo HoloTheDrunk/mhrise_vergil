@@ -10,21 +10,31 @@ local attach_hook = mdk.attach_hook
 local hooks = mdk.hooks
 
 local config = {
-  charge_required = 1000,
-  active_duration = 10,
+  charge_required = 100,
+  active_duration = 20,
   active_timescale = 0.2,
-  applying_speedup = 2,
-  cooldown_duration = 15,
+  applying_speedup = 2 / 0.2,
+  cooldown_duration = 1,
 }
 
----@type mdk.QuestPlayer?
+---@type QuestPlayer?
 local player = nil
 
 ---@class SavedHit
 ---@field timing number
 ---@field physical number
 ---@field elemental number
----@field pos { pos: Vector3f, joint: unknown|nil }
+---@field pos { pos: Vector3f, joint: Joint|nil }
+
+---@param hit SavedHit
+---@return string
+local function saved_hit_to_string(hit)
+  return string.format(
+    "%.0fms | %.0fp %.0fe | { pos: %s, joint: %s }",
+    hit.timing * 1000, hit.physical, hit.elemental,
+    tostring(hit.pos.pos), hit.pos.joint
+  )
+end
 
 ---@type number|nil Time cache invalidated every update cycle
 local _time_cache = nil
@@ -114,8 +124,10 @@ end
 
 ---@return self
 function ActiveState.init()
-  player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 2.0 / config.active_timescale)
-  set_time_scale(config.active_timescale)
+  if player ~= nil then
+    player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 2.0 / config.active_timescale)
+    set_time_scale(config.active_timescale)
+  end
   return setmetatable({
     inner = { start = time(), duration = config.active_duration, hits = {} },
     get_name = function() return "Active" end
@@ -138,15 +150,17 @@ function ActiveState:draw_ui()
   imgui.text_colored(tostring(#self.inner.hits), 0xff9999ff)
   local charge = 1 - (time() - self.inner.start) / self.inner.duration
   imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%% ⬇", math.floor(100 * charge)))
-  for i, hit in pairs(self.inner.hits) do
-    imgui.text(string.format("%.1f | %.0f phys %.0f elem", hit.timing, hit.physical, hit.elemental))
+  for _, hit in pairs(self.inner.hits) do
+    imgui.text(saved_hit_to_string(hit))
   end
 end
 
 ---@return self
 function ApplyingState.init()
-  player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 1.0)
-  set_time_scale(1.)
+  if player ~= nil then
+    player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 1.0)
+    set_time_scale(1.)
+  end
   return setmetatable({
     inner = { start = time(), hits = {}, done = 0, speed = config.applying_speedup },
     get_next = function() return CooldownState.init() end,
@@ -246,10 +260,35 @@ local function init(args)
   is_online = lobby_manager:is_quest_online()
 end
 
----@param hitInfo HitInfo
-local function on_stock_damage(hitInfo)
-  local physical_damage = hitInfo:get_physical_damage()
-  local elemental_damage = hitInfo:get_elemental_damage()
+---@param dmg_info DamageInfo
+local function on_stock_damage(dmg_info)
+  --Filter so we only handle shells...
+  local attacker_type = dmg_info:get_attacker_type();
+  if attacker_type ~= mdk.DamageAttackerType.types.invalid then return end
+  --...exclusively during the applying state when there are hits to apply
+  local state = state_manager:as(ApplyingState)
+  if not state or #state.inner.hits == 0 then return end
+
+  dmg_info:set_physical_damage(state.inner.hits[state.inner.done].physical)
+  dmg_info:set_elemental_damage(state.inner.hits[state.inner.done].elemental)
+end
+
+local latest_attack = { id = 0, type = "unknown" }
+
+---@param dmg_info DamageInfo
+---@param hit_info HitInfo
+local function on_after_calc_damage_side(dmg_info, hit_info)
+  local attacker_id = dmg_info:get_attacker_id()
+  if not player or player:get_index() ~= attacker_id then return end
+
+  local attacker_type = dmg_info:get_attacker_type();
+  latest_attack = {
+    id = attacker_id,
+    type = tostring(mdk.DamageAttackerType.name_from_id(attacker_type) or tostring(attacker_type))
+  }
+
+  local physical_damage = dmg_info:get_physical_damage()
+  local elemental_damage = dmg_info:get_elemental_damage()
 
   if state_manager:is(ChargingState) then
     local state = state_manager.state --[[@as ChargingState]]
@@ -261,7 +300,7 @@ local function on_stock_damage(hitInfo)
       timing = time() - state.inner.start,
       physical = physical_damage,
       elemental = elemental_damage,
-      pos = hitInfo:get_detailed_position()
+      pos = hit_info:get_detailed_position()
     }
   end
 end
@@ -271,15 +310,25 @@ local function main()
 
   attach_hook(hooks.enemy.stockDamage, function(args)
     if is_online or state_manager:is(CooldownState) then return end
-    on_stock_damage(mdk.HitInfo.new(args[3]))
+    on_stock_damage(mdk.DamageInfo.new(args[3]))
   end)
+
+  sdk.hook(
+    sdk.find_type_definition("snow.enemy.EnemyCharacterBase"):get_method("afterCalcDamage_DamageSide"),
+    function(args)
+      if is_online or state_manager:is(CooldownState) then return end
+      on_after_calc_damage_side(mdk.DamageInfo.new(args[3]), mdk.HitInfo.new(args[4]))
+    end
+  )
 
   attach_hook(hooks.player.update, function(args)
     if is_online then return end
 
-    local player = mdk.QuestPlayer.new(args[2])
-    if not mdk.utils.is_own_player(player) then
+    local cur_player = mdk.QuestPlayer.new(args[2])
+    if not mdk.utils.is_own_player(cur_player) then
       return
+    elseif player == nil then
+      player = cur_player
     end
 
     state_manager:update()
@@ -296,6 +345,11 @@ local function main()
         state.inner.done = state.inner.done + 1
         local hit = state.inner.hits[state.inner.done]
         -- TODO: Create a damaging shell at the desired position
+        local pos = hit.pos.pos
+        if hit.pos.joint ~= nil then
+          pos = hit.pos.joint:local_to_world(pos)
+        end
+        player._remo:call("setEquipSkill223Shell", pos)
       end
     end
   end)
@@ -330,9 +384,9 @@ local function main()
 
   sdk.hook(sdk.find_type_definition("snow.player.PlayerQuestBase"):get_method("updateHitStop"),
     function(args)
-	    if state_manager:is(ActiveState) then
-		    sdk.to_managed_object(args[2]):call("resetHitStop")
-	    end
+      if state_manager:is(ActiveState) then
+        sdk.to_managed_object(args[2]):call("resetHitStop")
+      end
     end
   )
 
@@ -349,7 +403,11 @@ local function main()
 
       imgui.separator()
 
-      if #debug > 0 then
+      imgui.text(string.format("latest_attack: { id = %d, type = %s }", latest_attack.id, latest_attack.type))
+
+      imgui.separator()
+
+      if show_debug and #debug > 0 then
         imgui.text(string.format("debug: %s", debug))
         -- debug = ""
       end
