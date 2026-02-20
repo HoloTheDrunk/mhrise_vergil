@@ -13,6 +13,7 @@ local config = {
   charge_required = 100,
   active_duration = 20,
   active_timescale = 0.2,
+  active_player_speedup = 1.5,
   applying_speedup = 2 / 0.2,
   cooldown_duration = 1,
 }
@@ -40,7 +41,10 @@ end
 local _time_cache = nil
 ---@return number
 local function time()
-  return _time_cache or mdk.utils.get_uptime()
+  if not _time_cache then
+    _time_cache = mdk.utils.get_uptime()
+  end
+  return _time_cache
 end
 
 ---@type number
@@ -59,13 +63,32 @@ local camera_manager = sdk.get_managed_singleton("snow.CameraManager") --[[@as R
 ---@type REManagedObject
 local system_manager = sdk.get_managed_singleton("snow.GameKeyboard") --[[@as REManagedObject]]
 
+---@type Transition?
+local time_scale_transition = nil
+---@type Transition?
+local player_speed_transition = nil
+
 ---@param speed number
 ---@return nil
 local function set_time_scale(speed)
   scene:call("set_TimeScale", speed)
   time_scale_manager:call("set_TimeScale", speed)
   camera_manager:call("get_GameObject"):call("set_TimeScale", 1.0)
-  system_manager:call("get_GameObject"):call("set_TimeScale", 1.0)
+  system_manager:call("get_GameObject"):call("set_TimeScale", speed)
+end
+
+---@param speed number
+---@param duration number
+---@return nil
+local function set_time_scale_target(speed, duration)
+  time_scale_transition = mdk.Transition.Transition.new(scene:call("get_TimeScale"), speed, time(), duration)
+end
+
+---@param speed number
+---@param duration number
+---@return nil
+local function set_player_speed_target(speed, duration)
+  player_speed_transition = mdk.Transition.Transition.new(scene:call("get_TimeScale"), speed, time(), duration)
 end
 --Timescale management (end)
 
@@ -125,8 +148,9 @@ end
 ---@return self
 function ActiveState.init()
   if player ~= nil then
-    player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 2.0 / config.active_timescale)
-    set_time_scale(config.active_timescale)
+    -- player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 1.25 / config.active_timescale)
+    set_player_speed_target(config.active_player_speedup / config.active_timescale, 1.)
+    set_time_scale_target(config.active_timescale, 1.)
   end
   return setmetatable({
     inner = { start = time(), duration = config.active_duration, hits = {} },
@@ -150,16 +174,17 @@ function ActiveState:draw_ui()
   imgui.text_colored(tostring(#self.inner.hits), 0xff9999ff)
   local charge = 1 - (time() - self.inner.start) / self.inner.duration
   imgui.progress_bar(charge, Vector2f.new(400, 40), string.format("Charge: %d%% ⬇", math.floor(100 * charge)))
-  for _, hit in pairs(self.inner.hits) do
-    imgui.text(saved_hit_to_string(hit))
-  end
+  -- for _, hit in pairs(self.inner.hits) do
+  --   imgui.text(saved_hit_to_string(hit))
+  -- end
 end
 
 ---@return self
 function ApplyingState.init()
   if player ~= nil then
-    player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 1.0)
-    set_time_scale(1.)
+    -- player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 1.0)
+    set_player_speed_target(1., 1.)
+    set_time_scale_target(1., 1.)
   end
   return setmetatable({
     inner = { start = time(), hits = {}, done = 0, speed = config.applying_speedup },
@@ -282,6 +307,8 @@ local function on_after_calc_damage_side(dmg_info, hit_info)
   if not player or player:get_index() ~= attacker_id then return end
 
   local attacker_type = dmg_info:get_attacker_type();
+  if attacker_type ~= mdk.DamageAttackerType.types.player_weapon then return end
+
   latest_attack = {
     id = attacker_id,
     type = tostring(mdk.DamageAttackerType.name_from_id(attacker_type) or tostring(attacker_type))
@@ -322,6 +349,7 @@ local function main()
   )
 
   attach_hook(hooks.player.update, function(args)
+    _time_cache = nil
     if is_online then return end
 
     local cur_player = mdk.QuestPlayer.new(args[2])
@@ -332,6 +360,20 @@ local function main()
     end
 
     state_manager:update()
+    if time_scale_transition then
+      set_time_scale(time_scale_transition:get(time()))
+      if time_scale_transition:is_done(time()) then
+        time_scale_transition = nil
+      end
+    end
+    if player_speed_transition then
+      player._remo
+          :call("get_MotLayer0Speed")
+          :call("setSpeed", 0, player_speed_transition:get(time()))
+      if player_speed_transition:is_done(time()) then
+        player_speed_transition = nil
+      end
+    end
 
     if state_manager:is(ApplyingState) then
       local state = state_manager.state --[[@as ApplyingState]]
@@ -404,6 +446,11 @@ local function main()
       imgui.separator()
 
       imgui.text(string.format("latest_attack: { id = %d, type = %s }", latest_attack.id, latest_attack.type))
+      imgui.text(string.format("time_scale: %s", tostring(scene:call("get_TimeScale"))))
+      if player then
+        imgui.text(string.format("player_speed: %s",
+          tostring(player._remo:call("get_MotLayer0Speed"):call("getSpeed", 0))))
+      end
 
       imgui.separator()
 
