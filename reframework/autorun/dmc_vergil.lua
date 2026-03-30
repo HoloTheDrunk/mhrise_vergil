@@ -221,13 +221,15 @@ end
 -- End of the madness
 
 local state_manager = StateManager.new(ChargingState)
-local node_stack = {}
 
----@type BehaviorTree | nil
-local player_bhvt = nil
+---Debug info storing latest player BHVT nodes
+local node_stack = {}
 
 ---Disable the mod in multiplayer
 local is_online = false
+
+---@type BehaviorTree | nil
+local player_bhvt = nil
 
 local function init_player_bhvt()
   if not player then return end
@@ -235,15 +237,32 @@ local function init_player_bhvt()
   player_bhvt = mp_obj:call("getComponent(System.Type)", sdk.typeof("via.behaviortree.BehaviorTree"))
 end
 
+---@type REManagedObject?
+local long_sword = nil
+
+local function init_weapon()
+  if not player then return end
+  long_sword = player._remo
+      :call("get_GameObject")
+      :call("getComponent(System.Type)", sdk.typeof("snow.player.LongSword")) --[[@as REManagedObject?]]
+  if not long_sword then return end
+
+  if long_sword:get_field("_LongSwordGaugeLv") == 3 then
+
+  end
+end
+
 local function init(args)
   if args[2] then
     player = mdk.QuestPlayer.new(args[2])
   end
+
   state_manager = StateManager.new(ChargingState)
 
   local lobby_manager = mdk.LobbyManager.new()
   is_online = lobby_manager:is_quest_online()
 
+  init_weapon()
   init_player_bhvt()
 end
 
@@ -281,7 +300,11 @@ local function on_after_calc_damage_side(dmg_info, hit_info)
 
   if state_manager:is(ChargingState) then
     local state = state_manager.state --[[@as ChargingState]]
-    state.inner.current = math.min(state.inner.required, state.inner.current + physical_damage + elemental_damage)
+    if not long_sword or long_sword:get_field("_LongSwordGaugeLv") < 3 then
+      state.inner.current = 0
+    else
+      state.inner.current = math.min(state.inner.required, state.inner.current + physical_damage + elemental_damage)
+    end
   elseif state_manager:is(ActiveState) then
     local state = state_manager.state --[[@as ActiveState]]
     local hits = state.inner.hits
@@ -322,6 +345,10 @@ local function main()
 
     if not player_bhvt then
       init_player_bhvt()
+    end
+
+    if not long_sword then
+      init_weapon()
     end
 
     local cur_player = mdk.QuestPlayer.new(args[2])
@@ -378,7 +405,7 @@ local function main()
     if state_manager:is(ChargingState)
         and bid == mdk.motions.motion_bank_ids.drawn
         and mid == mdk.motions.motions_ids.ls.special_sheathe_iai_spirit_slash
-        and player_bhvt and player_bhvt:call("getCurrentNodeID(System.UInt32)", nil) == 2004603551
+        and player_bhvt and player_bhvt:call("getCurrentNodeID(System.UInt32)", nil) == 2004603551 -- Iai success
     then
       local state = state_manager.state --[[@as ChargingState]]
       state.inner.iai = true
@@ -398,6 +425,16 @@ local function main()
     if state_manager:is(ActiveState) then
       sdk.to_managed_object(args[2]):call("resetHitStop")
     end
+  end)
+
+  local function draw_hud()
+    local weapon_hud_object = mdk.game.gui.GuiManager.new():get_weapon_hud() --[[@as GameObject]]
+    local weapon_hud = weapon_hud_object:get_component(mdk.game.gui.WeaponHud[1].long_sword)
+    if not weapon_hud then return end
+  end
+
+  re.on_frame(function()
+    pcall(draw_hud)
   end)
 
   re.on_draw_ui(function()
@@ -420,6 +457,17 @@ local function main()
         if mot_layer then
           imgui.text(string.format("player_speed: %s", tostring(mot_layer:call("getSpeed", 0))))
         end
+      end
+
+      imgui.separator()
+
+      imgui.text(string.format("LongSword : %s", tostring(long_sword)))
+      if long_sword then
+        imgui.text(string.format("LongSword GameObject Type : %s",
+          long_sword:get_type_definition():get_full_name()))
+
+        local gauge_level = long_sword:get_field("_LongSwordGaugeLv")
+        imgui.text(string.format("Gauge level : %s", tostring(gauge_level)))
       end
 
       imgui.separator()
