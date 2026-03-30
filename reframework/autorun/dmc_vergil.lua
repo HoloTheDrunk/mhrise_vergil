@@ -9,6 +9,8 @@ local mdk = require("mdk.prelude")
 local attach_hook = mdk.attach_hook
 local hooks = mdk.hooks
 
+local StateManager = require("mdk.utils.StateManager")
+
 local config = {
   charge_required = 100,
   active_duration = 20,
@@ -42,7 +44,7 @@ local _time_cache = nil
 ---@return number
 local function time()
   if not _time_cache then
-    _time_cache = mdk.utils.get_uptime()
+    _time_cache = mdk.game.time.get_uptime()
   end
   return _time_cache
 end
@@ -94,19 +96,13 @@ end
 
 --Start of the madness
 
----@class State
----@field inner unknown
----@field init fun(): self
----@field is_over fun(self: self): boolean
----@field get_next fun(self: self): State | nil
----@field get_name fun(self: self): string
----@field draw_ui fun(self: self): nil
-
+---Builds up charge based on damage done by the player
 ---@class ChargingState : State
 ---@field inner {current: number, required: number, iai: boolean}
 local ChargingState = {}
 ChargingState.__index = ChargingState
 
+---Records hits' position and damage
 ---@class ActiveState : State
 ---@field inner {start: number, duration: number, hits: SavedHit[]}
 local ActiveState = {}
@@ -118,6 +114,7 @@ ActiveState.__index = ActiveState
 local ApplyingState = {}
 ApplyingState.__index = ApplyingState
 
+---Cooldown before the player can start accumulating charge again
 ---@class CooldownState : State
 ---@field inner {start: number, duration: number}
 local CooldownState = {}
@@ -148,7 +145,6 @@ end
 ---@return self
 function ActiveState.init()
   if player ~= nil then
-    -- player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 1.25 / config.active_timescale)
     set_player_speed_target(config.active_player_speedup / config.active_timescale, 1.)
     set_time_scale_target(config.active_timescale, 1.)
   end
@@ -182,7 +178,6 @@ end
 ---@return self
 function ApplyingState.init()
   if player ~= nil then
-    -- player._remo:call("get_MotLayer0Speed"):call("setSpeed", 0, 1.0)
     set_player_speed_target(1., 1.)
     set_time_scale_target(1., 1.)
   end
@@ -223,54 +218,13 @@ function CooldownState:draw_ui()
   )
 end
 
----@class StateManager
----@field public state State
-local StateManager = {}
-StateManager.__index = StateManager
-
----@return self
-function StateManager.new()
-  return setmetatable({
-    state = ChargingState.init()
-  }, StateManager)
-end
-
-function StateManager:to_next()
-  local next = self.state:get_next()
-  if not next then
-    log.error("[dmc_vergil] Invalid state")
-    self.state = ChargingState.init()
-  else
-    self.state = next
-  end
-end
-
-function StateManager:update()
-  if self.state:is_over() then
-    self:to_next()
-  end
-end
-
----@generic T : State
----@param state T The state class you want to check against
----@return boolean
-function StateManager:is(state)
-  return getmetatable(self.state) == state
-end
-
----@generic T : State
----@param state T The state class you want to check against
----@return T | nil state The inner state
-function StateManager:as(state)
-  if getmetatable(self.state) == state then
-    return self.state
-  end
-  return nil
-end
-
 -- End of the madness
 
-local state_manager = StateManager.new()
+local state_manager = StateManager.new(ChargingState)
+local node_stack = {}
+
+---@type BehaviorTree | nil
+local player_bhvt = nil
 
 ---Disable the mod in multiplayer
 local is_online = false
@@ -279,10 +233,18 @@ local function init(args)
   if args[2] then
     player = mdk.QuestPlayer.new(args[2])
   end
-  state_manager = StateManager.new()
+  state_manager = StateManager.new(ChargingState)
 
   local lobby_manager = mdk.LobbyManager.new()
   is_online = lobby_manager:is_quest_online()
+
+  -- local player_manager = sdk.get_managed_singleton('snow.player.PlayerManager')
+  -- if not player_manager then return end
+  -- local master_player = player_manager:call("findMasterPlayer")
+  -- local mp_obj = master_player:call("get_GameObject")
+  if not player then return end
+  local mp_obj = player._remo:call("get_GameObject")
+  player_bhvt = mp_obj:call("getComponent(System.Type)", sdk.typeof("via.behaviortree.BehaviorTree"))
 end
 
 ---@param dmg_info DamageInfo
@@ -332,28 +294,34 @@ local function on_after_calc_damage_side(dmg_info, hit_info)
   end
 end
 
+local tbl = nil
+local tbl_time = 0
+local _cache = nil
+
 local function main()
   attach_hook(hooks.player.start, init)
 
-  attach_hook(hooks.enemy.stockDamage, function(args)
+  attach_hook(hooks.enemy.stock_damage, function(args)
     if is_online or state_manager:is(CooldownState) then return end
     on_stock_damage(mdk.DamageInfo.new(args[3]))
   end)
 
-  sdk.hook(
-    sdk.find_type_definition("snow.enemy.EnemyCharacterBase"):get_method("afterCalcDamage_DamageSide"),
-    function(args)
-      if is_online or state_manager:is(CooldownState) then return end
-      on_after_calc_damage_side(mdk.DamageInfo.new(args[3]), mdk.HitInfo.new(args[4]))
-    end
-  )
+  attach_hook(hooks.enemy.after_damage_calc, function(args)
+    if is_online or state_manager:is(CooldownState) then return end
+    -- if (not tbl or time() > tbl_time + 1) and args then
+    --   _cache = nil
+    --   tbl = args
+    --   tbl_time = time()
+    -- end
+    on_after_calc_damage_side(mdk.DamageInfo.new(args[3]), mdk.HitInfo.new(args[4]))
+  end)
 
   attach_hook(hooks.player.update, function(args)
     _time_cache = nil
     if is_online then return end
 
     local cur_player = mdk.QuestPlayer.new(args[2])
-    if not mdk.utils.is_own_player(cur_player) then
+    if not mdk.LobbyManager.is_own_player(cur_player) then
       return
     elseif player == nil then
       player = cur_player
@@ -391,46 +359,42 @@ local function main()
         if hit.pos.joint ~= nil then
           pos = hit.pos.joint:local_to_world(pos)
         end
-        player._remo:call("setEquipSkill223Shell", pos)
+        player:create_damaging_shell(pos)
       end
     end
   end)
 
-  sdk.hook(
-    sdk.find_type_definition("snow.player.PlayerMotionControl"):get_method("lateUpdate") --[[@as REMethodDefinition]],
-    function(args)
-      local motion_control = sdk.to_managed_object(args[2])
-      if not motion_control then return end
+  attach_hook(hooks.player.motion_control.late_update, function(args)
+    local motion_control = mdk.game.MotionControl.new(args[2])
+    if not motion_control then return end
 
-      local bid = motion_control:get_field("_OldBankID")
-      local mid = motion_control:get_field("_OldMotionID")
+    local bid = motion_control:get_old_bank_id()
+    local mid = motion_control:get_old_motion_id()
 
-      if state_manager:is(ChargingState)
-          and bid == mdk.motions.motion_bank_ids.drawn
-          and mid == mdk.motions.motions_ids.ls.special_sheathe_iai_spirit_slash
-      then
-        local state = state_manager.state --[[@as ChargingState]]
-        state.inner.iai = true
-      elseif state_manager:is(ActiveState)
-          and bid ~= mdk.motions.motion_bank_ids.drawn
-      then
-        set_time_scale(1.0)
-        state_manager:to_next()
-      end
-
-      if bid == mdk.motions.motion_bank_ids.drawn then
-        last_motion_id = mid
-      end
+    if state_manager:is(ChargingState)
+        and bid == mdk.motions.motion_bank_ids.drawn
+        and mid == mdk.motions.motions_ids.ls.special_sheathe_iai_spirit_slash
+        and player_bhvt and player_bhvt:call("getCurrentNodeID(System.UInt32)", nil) == 2004603551
+    then
+      local state = state_manager.state --[[@as ChargingState]]
+      state.inner.iai = true
+    elseif state_manager:is(ActiveState)
+        and bid ~= mdk.motions.motion_bank_ids.drawn
+    then
+      set_time_scale(1.0)
+      state_manager:to_next()
     end
-  )
 
-  sdk.hook(sdk.find_type_definition("snow.player.PlayerQuestBase"):get_method("updateHitStop"),
-    function(args)
-      if state_manager:is(ActiveState) then
-        sdk.to_managed_object(args[2]):call("resetHitStop")
-      end
+    if bid == mdk.motions.motion_bank_ids.drawn then
+      last_motion_id = mid
     end
-  )
+  end)
+
+  attach_hook(hooks.player.update_hit_stop, function(args)
+    if state_manager:is(ActiveState) then
+      sdk.to_managed_object(args[2]):call("resetHitStop")
+    end
+  end)
 
   re.on_draw_ui(function()
     if imgui.tree_node("DMC Vergil") then
@@ -448,11 +412,61 @@ local function main()
       imgui.text(string.format("latest_attack: { id = %d, type = %s }", latest_attack.id, latest_attack.type))
       imgui.text(string.format("time_scale: %s", tostring(scene:call("get_TimeScale"))))
       if player then
-        imgui.text(string.format("player_speed: %s",
-          tostring(player._remo:call("get_MotLayer0Speed"):call("getSpeed", 0))))
+        local mot_layer = player._remo:call("get_MotLayer0Speed")
+        if mot_layer then
+          imgui.text(string.format("player_speed: %s", tostring(mot_layer:call("getSpeed", 0))))
+        end
       end
 
       imgui.separator()
+
+      if imgui.tree_node("BHVT") then
+        if not player_bhvt then
+          imgui.text("player_bhvt not initialized")
+        else
+          local id = player_bhvt:call("getCurrentNodeID(System.UInt32)", nil)
+          local name = player_bhvt:call("getCurrentNodeName(System.UInt32)", nil)
+
+          if #node_stack == 0 or id ~= node_stack[#node_stack][1] then
+            node_stack[#node_stack + 1] = { id, name }
+          end
+
+          for i = #node_stack, (math.max(1, #node_stack - 10)), -1 do
+            local entry = node_stack[i]
+            imgui.text(string.format("%s : %s", tostring(entry[1]), entry[2]))
+          end
+        end
+        imgui.tree_pop()
+      end
+
+      imgui.separator()
+
+      if tbl and imgui.tree_node("TBL") then
+        local name = 2
+        local value = tbl[name]
+        if value or _cache then
+          local ty = type(value)
+          if not _cache and ty == "userdata" and sdk.is_managed_object(value) then
+            _cache = string.format("%s : %s -> %s", tostring(name), ty,
+              sdk.to_managed_object(value):get_type_definition():get_full_name())
+          elseif not _cache then
+            _cache = string.format("%s : %s", tostring(name), ty)
+          end
+          imgui.text(_cache)
+        else
+          imgui.text("wait")
+        end
+        -- for name, value in pairs(tbl) do
+        --   local ty = type(value)
+        --   if ty == "userdata" and sdk.is_managed_object(value) then
+        --     imgui.text(string.format("%s : %s -> %s", tostring(name), ty,
+        --       sdk.to_managed_object(value):get_type_definition():get_full_name()))
+        --   else
+        --     imgui.text(string.format("%s : %s", tostring(name), ty))
+        --   end
+        -- end
+        imgui.tree_pop()
+      end
 
       if show_debug and #debug > 0 then
         imgui.text(string.format("debug: %s", debug))
