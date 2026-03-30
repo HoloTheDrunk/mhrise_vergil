@@ -229,6 +229,12 @@ local player_bhvt = nil
 ---Disable the mod in multiplayer
 local is_online = false
 
+local function init_player_bhvt()
+  if not player then return end
+  local mp_obj = player._remo:call("get_GameObject")
+  player_bhvt = mp_obj:call("getComponent(System.Type)", sdk.typeof("via.behaviortree.BehaviorTree"))
+end
+
 local function init(args)
   if args[2] then
     player = mdk.QuestPlayer.new(args[2])
@@ -238,13 +244,7 @@ local function init(args)
   local lobby_manager = mdk.LobbyManager.new()
   is_online = lobby_manager:is_quest_online()
 
-  -- local player_manager = sdk.get_managed_singleton('snow.player.PlayerManager')
-  -- if not player_manager then return end
-  -- local master_player = player_manager:call("findMasterPlayer")
-  -- local mp_obj = master_player:call("get_GameObject")
-  if not player then return end
-  local mp_obj = player._remo:call("get_GameObject")
-  player_bhvt = mp_obj:call("getComponent(System.Type)", sdk.typeof("via.behaviortree.BehaviorTree"))
+  init_player_bhvt()
 end
 
 ---@param dmg_info DamageInfo
@@ -319,6 +319,10 @@ local function main()
   attach_hook(hooks.player.update, function(args)
     _time_cache = nil
     if is_online then return end
+
+    if not player_bhvt then
+      init_player_bhvt()
+    end
 
     local cur_player = mdk.QuestPlayer.new(args[2])
     if not mdk.LobbyManager.is_own_player(cur_player) then
