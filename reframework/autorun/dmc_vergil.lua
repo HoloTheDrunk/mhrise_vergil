@@ -28,6 +28,7 @@ local config = {
   },
   ui = {
     enable_debug = false,
+    -- Based on what looked decent on my screen
     x = 427 / 2560,
     y = 230 / 1440,
     size = 20,
@@ -66,7 +67,7 @@ local player = nil
 ---@type BehaviorTree | nil
 local player_bhvt = nil
 
----@type REManagedObject?
+---@type LongSword?
 local long_sword = nil
 
 ---@class SavedHit
@@ -77,15 +78,12 @@ local long_sword = nil
 
 local function init_player_bhvt()
   if not player then return end
-  local mp_obj = player._remo:call("get_GameObject")
-  player_bhvt = mp_obj:call("getComponent(System.Type)", sdk.typeof("via.behaviortree.BehaviorTree"))
+  player_bhvt = player:get_behavior_tree()
 end
 
 local function init_weapon()
   if not player then return end
-  long_sword = player._remo
-      :call("get_GameObject")
-      :call("getComponent(System.Type)", sdk.typeof("snow.player.LongSword")) --[[@as REManagedObject?]]
+  long_sword = player:get_long_sword()
   if not long_sword then return end
 end
 
@@ -447,7 +445,7 @@ local function on_after_calc_damage_side(dmg_info, hit_info)
 
   if state_manager:is(ChargingState) then
     local state = state_manager.state --[[@as ChargingState]]
-    if not long_sword or long_sword:get_field("_LongSwordGaugeLv") < 3 then
+    if not long_sword or long_sword:get_gauge_level() < 3 then
       state.inner.current = 0
     else
       state.inner.current = math.min(state.inner.required, state.inner.current + physical_damage + elemental_damage)
@@ -505,9 +503,7 @@ local function main()
       end
     end
     if player_speed_transition then
-      player._remo
-          :call("get_MotLayer0Speed")
-          :call("setSpeed", 0, player_speed_transition:get(time()))
+      player:set_animation_speed(player_speed_transition:get(time()))
       if player_speed_transition:is_done(time()) then
         player_speed_transition = nil
       end
@@ -515,7 +511,7 @@ local function main()
 
     if state_manager:is(ChargingState) then
       local state = state_manager.state --[[@as ChargingState]]
-      if not long_sword or long_sword:get_field("_LongSwordGaugeLv") < 3 then
+      if not long_sword or long_sword:get_gauge_level() < 3 then
         state.inner.current = 0
         state.inner.maxed_at = nil
       end
